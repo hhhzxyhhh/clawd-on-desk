@@ -225,19 +225,16 @@ class KimiLogMonitor {
       tracked.hadToolUse = true;
       this._clearTurnEndTimer(tracked);
       const toolName = toolMatch[1];
-      const durationSec = parseFloat(toolMatch[2]);
       const eventKey = `tool_${toolName.toLowerCase()}`;
 
       if (toolName === "Agent") {
         this._emit(tracked, "juggling", eventKey);
       } else if (toolName === "AskUserQuestion") {
         // AskUserQuestion means the user just finished answering a question.
-        // Long duration (>5s) likely means the user was actively thinking;
-        // send a notification nudge so they know Kimi received the answer.
-        this._emit(tracked, "attention", eventKey);
-        if (durationSec > 5) {
-          this._emit(tracked, "notification", `${eventKey}-nudge`);
-        }
+        // Use notification (priority 7) to forcefully interrupt any ongoing
+        // animation and give a clear visual cue that Kimi got the answer.
+        // notification auto-returns after 2.5s, much snappier than attention's 4s.
+        this._emit(tracked, "notification", eventKey);
       } else {
         this._emit(tracked, "working", eventKey);
       }
