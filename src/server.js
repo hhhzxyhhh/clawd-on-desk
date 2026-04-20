@@ -227,6 +227,19 @@ function syncKiroHooks() {
   }
 }
 
+function syncKimiHooks() {
+  try {
+    if (typeof ctx.syncKimiHooksImpl === "function") return ctx.syncKimiHooksImpl();
+    const { registerKimiHooks } = require("../hooks/kimi-install.js");
+    const { added, updated } = registerKimiHooks({ silent: true });
+    if (added > 0 || updated > 0) {
+      console.log(`Clawd: synced Kimi hooks (added ${added}, updated ${updated})`);
+    }
+  } catch (err) {
+    console.warn("Clawd: failed to sync Kimi hooks:", err.message);
+  }
+}
+
 function syncCursorHooks() {
   try {
     if (typeof ctx.syncCursorHooksImpl === "function") return ctx.syncCursorHooksImpl();
@@ -697,6 +710,7 @@ function startHttpServer() {
       syncCursorHooks();
       syncCodeBuddyHooks();
       syncKiroHooks();
+      syncKimiHooks();
       syncOpencodePlugin();
     });
   });
@@ -718,6 +732,7 @@ return {
   syncCursorHooks,
   syncCodeBuddyHooks,
   syncKiroHooks,
+  syncKimiHooks,
   syncOpencodePlugin,
   startClaudeSettingsWatcher,
   stopClaudeSettingsWatcher,

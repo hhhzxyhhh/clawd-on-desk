@@ -3,9 +3,9 @@ const assert = require("node:assert");
 const registry = require("../agents/registry");
 
 describe("Agent Registry", () => {
-  it("should return all seven agents", () => {
+  it("should return all agents", () => {
     const agents = registry.getAllAgents();
-    assert.strictEqual(agents.length, 8);
+    assert.strictEqual(agents.length, 9);
     const ids = agents.map((a) => a.id);
     assert.ok(ids.includes("claude-code"));
     assert.ok(ids.includes("codex"));
@@ -14,6 +14,7 @@ describe("Agent Registry", () => {
     assert.ok(ids.includes("cursor-agent"));
     assert.ok(ids.includes("codebuddy"));
     assert.ok(ids.includes("kiro-cli"));
+    assert.ok(ids.includes("kimi-cli"));
     assert.ok(ids.includes("opencode"));
   });
 
@@ -25,6 +26,7 @@ describe("Agent Registry", () => {
     assert.strictEqual(registry.getAgent("cursor-agent").name, "Cursor Agent");
     assert.strictEqual(registry.getAgent("codebuddy").name, "CodeBuddy");
     assert.strictEqual(registry.getAgent("kiro-cli").name, "Kiro CLI");
+    assert.strictEqual(registry.getAgent("kimi-cli").name, "Kimi CLI");
     assert.strictEqual(registry.getAgent("nonexistent"), undefined);
   });
 
@@ -76,6 +78,7 @@ describe("Agent Registry", () => {
     assert.ok(agentIds.includes("gemini-cli"));
     assert.ok(agentIds.includes("cursor-agent"));
     assert.ok(agentIds.includes("kiro-cli"));
+    assert.ok(agentIds.includes("kimi-cli"));
   });
 
   it("should have correct capabilities", () => {

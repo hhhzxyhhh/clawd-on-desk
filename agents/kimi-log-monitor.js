@@ -231,10 +231,9 @@ class KimiLogMonitor {
         this._emit(tracked, "juggling", eventKey);
       } else if (toolName === "AskUserQuestion") {
         // AskUserQuestion means the user just finished answering a question.
-        // Use notification (priority 7) to forcefully interrupt any ongoing
-        // animation and give a clear visual cue that Kimi got the answer.
-        // notification auto-returns after 2.5s, much snappier than attention's 4s.
-        this._emit(tracked, "notification", eventKey);
+        // Use attention (priority 5) — it's the standard "turn done / waiting"
+        // cue and doesn't get confused with permission-request notification.
+        this._emit(tracked, "attention", eventKey);
       } else {
         this._emit(tracked, "working", eventKey);
       }
@@ -246,32 +245,20 @@ class KimiLogMonitor {
       // Cancel any existing turn-end timer
       this._clearTurnEndTimer(tracked);
 
-      // Fast path: if this looks like a pure-text final answer (small output,
-      // no tools used this turn), go straight to attention/idle without
-      // the defer delay so the pet doesn't stay "working" after the user
-      // already sees the answer in the terminal.
-      const outputMatch = line.match(/output=(\d+)/);
-      const outputTokens = outputMatch ? parseInt(outputMatch[1], 10) : 0;
-      const isLikelyFinalAnswer = outputTokens > 0 && outputTokens < 300 && !tracked.hadToolUse;
-
-      if (isLikelyFinalAnswer) {
-        // Use notification (priority 7) instead of attention (priority 5) so
-        // it forcefully interrupts any ongoing thinking/working animation
-        // and bypasses the 1s min-display hold.
-        this._emit(tracked, "notification", "turn_end");
-        return;
-      }
-
       // Emit working immediately (LLM finished thinking; either tools are
       // running or the turn is about to end)
       this._emit(tracked, "working", "llm_step");
-      // Start deferred turn-end: if no new tool events arrive within the
-      // defer window, treat this as the end of the turn.
+
+      // Start deferred turn-end: if no new log events arrive within the
+      // defer window, fall back to idle.  We do NOT send attention here
+      // because the log monitor cannot distinguish a mid-turn LLM step
+      // from a true final answer — a small output may still be followed
+      // by a tool call (e.g. Shell permission request).  The definitive
+      // "task complete" attention is sent by the hook path on Stop event.
       tracked.turnEndTimer = setTimeout(() => {
         tracked.turnEndTimer = null;
-        const resolved = tracked.hadToolUse ? "attention" : "idle";
         tracked.hadToolUse = false;
-        this._emit(tracked, resolved, "turn_end");
+        this._emit(tracked, "idle", "turn_end");
       }, this._turnEndDeferMs);
       return;
     }

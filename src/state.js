@@ -126,6 +126,12 @@ const UPDATE_VISUAL_SVG_MAP = {
 let wakePollTimer = null;
 let lastWakeCursorX = null, lastWakeCursorY = null;
 
+// ── Kimi CLI permission hold ──
+// Keeps the pet in notification state while Kimi is waiting for user approval.
+let kimiPermissionActive = false;
+let kimiPermissionTimer = null;
+const KIMI_PERMISSION_MAX_MS = 60000;
+
 // ── Stale cleanup ──
 let staleCleanupTimer = null;
 let _detectInFlight = false;
@@ -217,6 +223,16 @@ function setState(newState, svgOverride) {
   const sameState = newState === currentState;
   const sameSvg = !svgOverride || svgOverride === currentSvg;
   if (sameState && sameSvg) {
+    // Kimi CLI permission hold: re-arm the auto-return timer so the
+    // notification animation keeps cycling while the user is reviewing
+    // the permission prompt.
+    if (kimiPermissionActive && newState === "notification" && AUTO_RETURN_MS[newState]) {
+      if (autoReturnTimer) { clearTimeout(autoReturnTimer); autoReturnTimer = null; }
+      autoReturnTimer = setTimeout(() => {
+        autoReturnTimer = null;
+        applyResolvedDisplayState();
+      }, AUTO_RETURN_MS[newState]);
+    }
     return;
   }
 
@@ -286,6 +302,12 @@ function resolveVisualBinding(state) {
 function applyResolvedDisplayState() {
   const resolved = resolveDisplayState();
   applyState(resolved, getSvgOverride(resolved));
+  // Kimi CLI permission hold: while notification is pinned, re-trigger the
+  // renderer animation so non-looping GIF/APNG assets replay instead of
+  // freezing on their last frame.
+  if (kimiPermissionActive && resolved === "notification") {
+    ctx.sendToRenderer("kimi-permission-pulse");
+  }
 }
 
 function playWakeTransitionOrResolve() {
@@ -587,12 +609,14 @@ function updateSession(sessionId, state, event, opts = {}) {
     if (startupRecoveryTimer) { clearTimeout(startupRecoveryTimer); startupRecoveryTimer = null; }
   }
 
+  const existing = sessions.get(sessionId);
+  const permAgentId = agentId || (existing && existing.agentId) || null;
+
   if (event === "PermissionRequest") {
     setState("notification");
+    if (permAgentId === "kimi-cli") startKimiPermissionPoll(sessionId);
     return;
   }
-
-  const existing = sessions.get(sessionId);
   const srcPid = sourcePid || (existing && existing.sourcePid) || null;
   const srcCwd = cwd || (existing && existing.cwd) || "";
   const srcEditor = editor || (existing && existing.editor) || null;
@@ -661,6 +685,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     sessions.delete(sessionId);
     debugSession(`session-end delete ${describeSession(sessionId, endingSession)}`);
     cleanStaleSessions();
+    if (srcAgentId === "kimi-cli") stopKimiPermissionPoll(sessionId);
     if (!endingSession || !endingSession.headless) {
       let hasLiveInteractive = false;
       for (const s of sessions.values()) {
@@ -713,7 +738,23 @@ function updateSession(sessionId, state, event, opts = {}) {
   cleanStaleSessions();
 
   if (ONESHOT_STATES.has(state)) {
+    // Kimi permission hold: while waiting for user approval, notification
+    // (priority 7) must not be clobbered by lower-priority oneshot states
+    // such as attention (5) from the log monitor.  The oneshot branch
+    // normally bypasses resolveDisplayState(), so we gate here.
+    if (kimiPermissionActive && (STATE_PRIORITY[state] || 0) < (STATE_PRIORITY.notification || 0)) {
+      // Still process lifecycle side-effects (e.g. stop the hold on PostToolUse)
+      if (srcAgentId === "kimi-cli" && (event === "PostToolUse" || event === "PostToolUseFailure" || event === "Stop")) {
+        stopKimiPermissionPoll(sessionId);
+      }
+      return;
+    }
     setState(state);
+    // Kimi permission lifecycle: any terminal event (PostToolUse, Stop, etc.)
+    // clears the hold so the pet can return to normal state after the oneshot.
+    if (srcAgentId === "kimi-cli" && (event === "PostToolUse" || event === "PostToolUseFailure" || event === "Stop")) {
+      stopKimiPermissionPoll(sessionId);
+    }
     return;
   }
 
@@ -845,6 +886,32 @@ function stopStaleCleanup() {
   if (staleCleanupTimer) { clearInterval(staleCleanupTimer); staleCleanupTimer = null; }
 }
 
+function startKimiPermissionPoll(sessionId) {
+  if (kimiPermissionTimer) {
+    clearTimeout(kimiPermissionTimer);
+    kimiPermissionTimer = null;
+  }
+  kimiPermissionActive = true;
+  // Safety cap: if something goes wrong (e.g. PostToolUse never arrives),
+  // auto-clear after 60s so the pet doesn't get stuck forever.
+  kimiPermissionTimer = setTimeout(() => {
+    kimiPermissionActive = false;
+    kimiPermissionTimer = null;
+    applyResolvedDisplayState();
+  }, KIMI_PERMISSION_MAX_MS);
+}
+
+function stopKimiPermissionPoll(sessionId) {
+  if (kimiPermissionTimer) {
+    clearTimeout(kimiPermissionTimer);
+    kimiPermissionTimer = null;
+  }
+  if (kimiPermissionActive) {
+    kimiPermissionActive = false;
+    applyResolvedDisplayState();
+  }
+}
+
 function resolveDisplayState() {
   let best;
   if (sessions.size === 0) {
@@ -859,6 +926,13 @@ function resolveDisplayState() {
     }
     if (!hasNonHeadless) best = "idle";
   }
+  // Kimi CLI permission hold: while waiting for user approval, keep the pet
+  // visually in notification state. Resolved here so it participates in the
+  // same priority logic as other agent states.
+  if (kimiPermissionActive && (STATE_PRIORITY[best] || 0) < (STATE_PRIORITY.notification || 0)) {
+    best = "notification";
+  }
+
   // Update overlay participates in priority — won't override higher-priority agent states
   if (updateVisualState && (STATE_PRIORITY[updateVisualState] || 0) >= (STATE_PRIORITY[best] || 0)) {
     return updateVisualState;
