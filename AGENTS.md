@@ -4,7 +4,7 @@ This file is the entry point for coding agents working in this repository. Keep 
 
 ## Project Overview
 
-Clawd 是一个 Electron 桌宠：通过 hook 和日志轮询感知 AI coding agent 的工作状态，并播放像素风动画。当前支持 Claude Code、Codex CLI、Copilot CLI、Cursor Agent、Gemini CLI、Kiro CLI、CodeBuddy、opencode；内置 Clawd / Calico 两套主题，支持用户主题；平台覆盖 Windows、macOS、Linux，UI 支持 en / zh / ko。
+Clawd 是一个 Electron 桌宠：通过 hook 和日志轮询感知 AI coding agent 的工作状态，并播放像素风动画。当前支持 Claude Code、Codex CLI、Copilot CLI、Cursor Agent、Gemini CLI、Kiro CLI、Kimi Code、CodeBuddy、opencode；内置 Clawd / Calico 两套主题，支持用户主题；平台覆盖 Windows、macOS、Linux，UI 支持 en / zh / ko。
 
 ## Common Commands
 
@@ -23,6 +23,7 @@ npm run uninstall:claude-hooks
 npm run install:cursor-hooks
 npm run install:gemini-hooks
 npm run install:kiro-hooks
+npm run install:kimi-hooks
 node hooks/codebuddy-install.js
 node hooks/opencode-install.js
 
@@ -33,7 +34,7 @@ bash test-macos.sh
 bash test-oneshot-gate.sh [state] [seconds]
 ```
 
-正常启动时，Clawd 会自动同步 Claude / Gemini / Cursor / CodeBuddy / Kiro hooks 和 opencode plugin。手动安装命令主要用于调试、重装或远程部署。
+正常启动时，Clawd 会自动同步 Claude / Gemini / Cursor / CodeBuddy / Kiro / Kimi hooks 和 opencode plugin。手动安装命令主要用于调试、重装或远程部署。
 
 ## Read These Docs
 
@@ -77,7 +78,9 @@ bash test-oneshot-gate.sh [state] [seconds]
 | `agents/registry.js` | agent 注册表 |
 | `agents/codex-log-monitor.js` | Codex JSONL 轮询 |
 | `agents/gemini-log-monitor.js` | Gemini session JSON 轮询 |
+| `agents/kimi-cli.js` | Kimi Code agent 配置（hook-only） |
 | `hooks/install.js` | Claude hook 注册 / 卸载 |
+| `hooks/kimi-hook.js` + `hooks/kimi-install.js` | Kimi TOML hooks 事件映射与自动同步 |
 | `hooks/cursor-install.js` / `gemini-install.js` / `kiro-install.js` / `codebuddy-install.js` / `opencode-install.js` | 各 agent 集成安装逻辑 |
 
 ## Constraints
@@ -87,6 +90,7 @@ bash test-oneshot-gate.sh [state] [seconds]
 - hook / plugin 侧需要稳定终端 PID 时，必须走 `getStablePid()` 进程树解析；不要用 `process.ppid` 做简化替代
 - HTTP 服务端口范围固定为 `127.0.0.1:23333-23337`；运行时端口写入 `~/.clawd/runtime.json`
 - 注册 Claude Code hook 时只能追加，不能覆盖用户已有 hook 数组
+- Kimi 采用 hook-only 集成（`~/.kimi/config.toml`），`agents/kimi-log-monitor.js` 仅保留兼容 stub，不再参与运行态
 - 资源路径统一用 `path.join(__dirname, ...)`
 - 需要编辑发布素材时，先复制到 `assets/source/` 再改，不要直接改工作素材来源不明的文件
 - 主题状态、sleep/DND、mini mode、状态映射的细节在 `docs/project/theme-state-ui.md`

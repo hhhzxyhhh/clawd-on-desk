@@ -374,6 +374,7 @@ function startHttpServer() {
           // "ignore + fall back" pattern used by cwd / agent_id above.
           const rawTitle = typeof data.session_title === "string" ? data.session_title.trim() : "";
           const sessionTitle = rawTitle || null;
+          const permissionSuspect = data.permission_suspect === true;
           // Agent gate: user disabled this agent in the settings panel. Drop
           // with 204 so hook scripts get a quick no-op response instead of
           // hanging on our HTTP connection. Still surfaces as a success code
@@ -412,6 +413,7 @@ function startHttpServer() {
                 headless,
                 displayHint: display_svg,
                 sessionTitle,
+                permissionSuspect,
               });
             }
             res.writeHead(200, { [CLAWD_SERVER_HEADER]: CLAWD_SERVER_ID });

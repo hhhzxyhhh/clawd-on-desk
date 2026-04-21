@@ -116,15 +116,15 @@ describe("Kimi hook installer", () => {
   });
 
   it("skips when ~/.kimi/ does not exist", () => {
-    // On machines without Kimi installed this returns zeros; on dev machines
-    // it may register hooks. Just assert the return shape is correct.
+    const { root } = makeTempKimiHome();
+    const settingsPath = path.join(root, ".kimi-not-exist", "config.toml");
     const result = registerKimiHooks({
       silent: true,
+      settingsPath,
       nodeBin: "/usr/local/bin/node",
     });
 
-    assert.strictEqual(typeof result.added, "number");
-    assert.strictEqual(typeof result.skipped, "number");
-    assert.strictEqual(typeof result.updated, "number");
+    assert.deepStrictEqual(result, { added: 0, skipped: 0, updated: 0 });
+    assert.ok(!fs.existsSync(settingsPath));
   });
 });

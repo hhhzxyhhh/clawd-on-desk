@@ -33,6 +33,12 @@ Gemini CLI 状态同步（session JSON 轮询，~1.5s 延迟 + 4s 完成延迟�
     → agents/gemini-log-monitor.js（轮询 JSON，diff 消息数组检测工具调用/完成）
     → 同上状态机（agent_id: gemini-cli）
 
+Kimi Code 状态同步（TOML command hooks，hook-only）：
+  Kimi 触发事件
+    → hooks/kimi-hook.js（hook_event_name + stdin JSON → agents/kimi-cli.js 映射 → HTTP POST）
+    → 同上状态机（agent_id: kimi-cli）
+  hooks/kimi-install.js 会把 [[hooks]] 条目追加到 ~/.kimi/config.toml（append-only, idempotent）
+
 Kiro CLI 状态同步（per-agent hook，stdin JSON）：
   Kiro CLI 触发事件
     → hooks/kiro-hook.js（camelCase 事件 → agents/kiro-cli.js 映射 → HTTP POST）
@@ -84,12 +90,14 @@ opencode 权限气泡（event hook + 反向 bridge，非阻塞）：
 - `agents/copilot-cli.js` — Copilot CLI camelCase 事件映射
 - `agents/cursor-agent.js` — Cursor Agent（hooks.json）事件映射
 - `agents/gemini-cli.js` — Gemini CLI 事件映射 + JSON 轮询配置
+- `agents/kimi-cli.js` — Kimi Code 事件映射（PascalCase），hook-only
 - `agents/kiro-cli.js` — Kiro CLI 事件映射（camelCase），无 HTTP hook / 无权限 / 无 subagent
 - `agents/codebuddy.js` — CodeBuddy 事件映射（PascalCase，Claude Code 兼容），支持权限
 - `agents/opencode.js` — opencode 事件映射 + 能力（plugin、permission、terminal focus）
 - `agents/registry.js` — agent 注册表：按 ID 或进程名查找 agent 配置
 - `agents/codex-log-monitor.js` — Codex JSONL 增量轮询器（文件监视 + 增量读取 + 事件去重）
 - `agents/gemini-log-monitor.js` — Gemini session JSON 轮询器（消息数组 diff + 4s 完成延迟窗口）
+- `agents/kimi-log-monitor.js` — Kimi 轮询器历史兼容 stub（当前 hook-only 模式不启用）
 
 运行时的 agent 启停 / 权限气泡开关通过 `src/agent-gate.js` 读 `prefs.agents[id].enabled` / `.permissionsEnabled`（默认 true，snapshot 缺字段时也 true 以兼容旧版），供 `state.js` 和 `server.js` 判断是否处理该 agent 的事件。
 
@@ -98,7 +106,7 @@ opencode 权限气泡（event hook + 反向 bridge，非阻塞）：
 启动链路会自动补齐缺失集成：
 
 - `main.js` 会先调用 `registerHooks({ silent: true, autoStart: true, port })`
-- `server.js` 启动后异步同步 Claude / Gemini / Cursor / CodeBuddy / Kiro hooks 和 opencode plugin
+- `server.js` 启动后异步同步 Claude / Gemini / Cursor / CodeBuddy / Kiro / Kimi hooks 和 opencode plugin
 - Claude hook 同步时还会扫 `DEPRECATED_CORE_HOOKS`（当前含 `WorktreeCreate`）清掉旧版本留下的过时 clawd hook 条目，仅删 command 指向 `clawd-hook.js` 的那条，用户自己写的同事件 hook 不动
 
 手动安装命令主要用于调试、重装或远程机部署。

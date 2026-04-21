@@ -128,9 +128,48 @@ let lastWakeCursorX = null, lastWakeCursorY = null;
 
 // ── Kimi CLI permission hold ──
 // Keeps the pet in notification state while Kimi is waiting for user approval.
-let kimiPermissionActive = false;
-let kimiPermissionTimer = null;
-const KIMI_PERMISSION_MAX_MS = 60000;
+const kimiPermissionHolds = new Map();
+// Fail-safe ceiling: only triggers if every Kimi clear-event hook is missed
+// AND the agent process keeps running. Real users frequently linger on the
+// TUI for tens of seconds (phone, lunch, deciding) so we keep this very
+// generous — the precise number isn't load bearing, the per-session cleanup
+// path (cleanStaleSessions / SessionEnd / Kimi event remap) is what should
+// release the hold in practice. Override with CLAWD_KIMI_PERMISSION_MAX_MS.
+function parseKimiHoldMaxMs() {
+  const raw = process.env.CLAWD_KIMI_PERMISSION_MAX_MS;
+  const n = Number.parseInt(raw, 10);
+  // 0 disables the timer entirely (hold stays until an event or stale-cleanup).
+  if (Number.isFinite(n) && n >= 0 && n <= 24 * 60 * 60 * 1000) return n;
+  return 10 * 60 * 1000; // 10 min default
+}
+// Throttle for the renderer-pulse that re-arms the notification animation
+// when other agent events arrive during a hold. Without throttling the GIF
+// looks like it keeps restarting from frame 0.
+const KIMI_PULSE_MIN_GAP_MS = 3000;
+let _lastKimiPulseAt = 0;
+
+// Kimi CLI does not expose a "this PreToolUse requires approval" flag in its
+// hook payload, and its approval UI is a TUI (not an HTTP round trip).
+// We therefore use a short delay-then-promote heuristic:
+//   1. PreToolUse on a permission-gated tool arrives with permission_suspect=true
+//   2. We keep the pet at `working` and start a suspect timer (default 800ms)
+//   3. If PostToolUse / PostToolUseFailure / Stop / SessionEnd arrives first,
+//      the tool was auto-approved (previously granted) — cancel the timer,
+//      never flash notification
+//   4. If the timer fires, Kimi is probably still blocked on the TUI waiting
+//      for the user — promote to a real permission hold (notification state)
+const kimiPermissionSuspectTimers = new Map();
+function parseSuspectDelay() {
+  const raw = process.env.CLAWD_KIMI_PERMISSION_SUSPECT_MS;
+  const n = Number.parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 0 && n <= 10000) return n;
+  return 800;
+}
+
+function hasPermissionAnimationLock() {
+  const pendingCount = Array.isArray(ctx.pendingPermissions) ? ctx.pendingPermissions.length : 0;
+  return pendingCount > 0 || kimiPermissionHolds.size > 0;
+}
 
 // ── Stale cleanup ──
 let staleCleanupTimer = null;
@@ -226,7 +265,7 @@ function setState(newState, svgOverride) {
     // Kimi CLI permission hold: re-arm the auto-return timer so the
     // notification animation keeps cycling while the user is reviewing
     // the permission prompt.
-    if (kimiPermissionActive && newState === "notification" && AUTO_RETURN_MS[newState]) {
+    if (hasPermissionAnimationLock() && newState === "notification" && AUTO_RETURN_MS[newState]) {
       if (autoReturnTimer) { clearTimeout(autoReturnTimer); autoReturnTimer = null; }
       autoReturnTimer = setTimeout(() => {
         autoReturnTimer = null;
@@ -304,9 +343,14 @@ function applyResolvedDisplayState() {
   applyState(resolved, getSvgOverride(resolved));
   // Kimi CLI permission hold: while notification is pinned, re-trigger the
   // renderer animation so non-looping GIF/APNG assets replay instead of
-  // freezing on their last frame.
-  if (kimiPermissionActive && resolved === "notification") {
-    ctx.sendToRenderer("kimi-permission-pulse");
+  // freezing on their last frame. Throttled so concurrent agents flooding
+  // events don't make the GIF visibly restart every tick.
+  if (hasPermissionAnimationLock() && resolved === "notification") {
+    const now = Date.now();
+    if (now - _lastKimiPulseAt >= KIMI_PULSE_MIN_GAP_MS) {
+      _lastKimiPulseAt = now;
+      ctx.sendToRenderer("kimi-permission-pulse");
+    }
   }
 }
 
@@ -603,6 +647,7 @@ function updateSession(sessionId, state, event, opts = {}) {
     headless = false,
     displayHint = undefined,
     sessionTitle = null,
+    permissionSuspect = false,
   } = opts;
   if (startupRecoveryActive) {
     startupRecoveryActive = false;
@@ -736,25 +781,57 @@ function updateSession(sessionId, state, event, opts = {}) {
     }
   }
   cleanStaleSessions();
+  // Any Kimi event other than the PreToolUse that originally opened the hold
+  // means the user already answered (Approve / Reject / Reject-and-tell-model)
+  // and the agent loop has moved on. We must NOT keep the pet stuck on the
+  // notification animation past that point, even if PostToolUse is delayed
+  // (e.g. user approved `sleep 30`).
+  const KIMI_HOLD_CLEAR_EVENTS = new Set([
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Stop",
+    "StopFailure",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+    "Notification",
+  ]);
+  const shouldClearKimiPermission = srcAgentId === "kimi-cli"
+    && KIMI_HOLD_CLEAR_EVENTS.has(event);
+  if (shouldClearKimiPermission) stopKimiPermissionPoll(sessionId);
+
+  // A brand-new PreToolUse for the same Kimi session starts a fresh approval
+  // gate. Drop any leftover hold/suspect from the previous round so the new
+  // suspect heuristic decides cleanly (and the animation doesn't carry over
+  // from the prior tool).
+  if (event === "PreToolUse" && srcAgentId === "kimi-cli") {
+    if (kimiPermissionHolds.has(sessionId)) stopKimiPermissionPoll(sessionId);
+    else cancelPermissionSuspect(sessionId);
+  }
+
+  // Kimi permission heuristic: hook reports permission_suspect=true on
+  // PreToolUse for gated tools. We defer the notification switch; if the
+  // tool was auto-approved a PostToolUse will cancel us before the timer
+  // fires, which is how we avoid flashing notification for auto-approved
+  // commands.
+  if (
+    permissionSuspect === true
+    && srcAgentId === "kimi-cli"
+    && event === "PreToolUse"
+  ) {
+    schedulePermissionSuspect(sessionId);
+  }
 
   if (ONESHOT_STATES.has(state)) {
-    // Kimi permission hold: while waiting for user approval, notification
-    // (priority 7) must not be clobbered by lower-priority oneshot states
-    // such as attention (5) from the log monitor.  The oneshot branch
-    // normally bypasses resolveDisplayState(), so we gate here.
-    if (kimiPermissionActive && (STATE_PRIORITY[state] || 0) < (STATE_PRIORITY.notification || 0)) {
-      // Still process lifecycle side-effects (e.g. stop the hold on PostToolUse)
-      if (srcAgentId === "kimi-cli" && (event === "PostToolUse" || event === "PostToolUseFailure" || event === "Stop")) {
-        stopKimiPermissionPoll(sessionId);
-      }
+    // Permission animation lock: while any permission request is pending,
+    // keep the pet on notification and block all other one-shot visuals.
+    // (One-shot branch normally bypasses resolveDisplayState()).
+    if (hasPermissionAnimationLock() && state !== "notification") {
       return;
     }
     setState(state);
-    // Kimi permission lifecycle: any terminal event (PostToolUse, Stop, etc.)
-    // clears the hold so the pet can return to normal state after the oneshot.
-    if (srcAgentId === "kimi-cli" && (event === "PostToolUse" || event === "PostToolUseFailure" || event === "Stop")) {
-      stopKimiPermissionPoll(sessionId);
-    }
     return;
   }
 
@@ -770,13 +847,29 @@ function cleanStaleSessions() {
   const now = Date.now();
   let changed = false;
   let removedNonHeadless = false;
+  // Helper: when a Kimi session is removed by stale cleanup, drop any
+  // hold/suspect timer attached to it. Otherwise the pet would stay locked
+  // on `notification` even after the Kimi process is gone (the
+  // event-driven release paths can never fire post-mortem).
+  const disposeKimiTimers = (id) => {
+    cancelPermissionSuspect(id);
+    const hold = kimiPermissionHolds.get(id);
+    if (hold) {
+      if (hold.timer) clearTimeout(hold.timer);
+      kimiPermissionHolds.delete(id);
+    }
+  };
+  const dropSession = (id, s) => {
+    if (s && s.agentId === "kimi-cli") disposeKimiTimers(id);
+    sessions.delete(id);
+  };
   for (const [id, s] of sessions) {
     const age = now - s.updatedAt;
 
     if (s.pidReachable && s.agentPid && !isProcessAlive(s.agentPid)) {
       debugSession(`stale-delete agent-exit ${describeSession(id, s)}`);
       if (!s.headless) removedNonHeadless = true;
-      sessions.delete(id); changed = true;
+      dropSession(id, s); changed = true;
       continue;
     }
 
@@ -785,7 +878,7 @@ function cleanStaleSessions() {
         if (!isProcessAlive(s.sourcePid)) {
           debugSession(`stale-delete source-exit ${describeSession(id, s)}`);
           if (!s.headless) removedNonHeadless = true;
-          sessions.delete(id); changed = true;
+          dropSession(id, s); changed = true;
         } else if (s.state !== "idle") {
           debugSession(`stale-idle session-timeout ${describeSession(id, s)}`);
           s.state = "idle"; s.displayHint = null; changed = true;
@@ -793,17 +886,17 @@ function cleanStaleSessions() {
       } else if (!s.pidReachable) {
         debugSession(`stale-delete unreachable ${describeSession(id, s)}`);
         if (!s.headless) removedNonHeadless = true;
-        sessions.delete(id); changed = true;
+        dropSession(id, s); changed = true;
       } else {
         debugSession(`stale-delete no-source ${describeSession(id, s)}`);
         if (!s.headless) removedNonHeadless = true;
-        sessions.delete(id); changed = true;
+        dropSession(id, s); changed = true;
       }
     } else if (age > WORKING_STALE_MS) {
       if (s.pidReachable && s.sourcePid && !isProcessAlive(s.sourcePid)) {
         debugSession(`stale-delete working-source-exit ${describeSession(id, s)}`);
         if (!s.headless) removedNonHeadless = true;
-        sessions.delete(id); changed = true;
+        dropSession(id, s); changed = true;
       } else if (s.state === "working" || s.state === "juggling" || s.state === "thinking") {
         debugSession(`stale-idle working-timeout ${describeSession(id, s)}`);
         s.state = "idle"; s.displayHint = null; s.updatedAt = now; changed = true;
@@ -839,6 +932,14 @@ function clearSessionsByAgent(agentId) {
   for (const [id, s] of sessions) {
     if (s && s.agentId === agentId) {
       sessions.delete(id);
+      if (agentId === "kimi-cli") {
+        cancelPermissionSuspect(id);
+        const hold = kimiPermissionHolds.get(id);
+        if (hold) {
+          if (hold.timer) clearTimeout(hold.timer);
+          kimiPermissionHolds.delete(id);
+        }
+      }
       removed++;
     }
   }
@@ -866,12 +967,12 @@ function detectRunningAgentProcesses(callback) {
   const { exec } = require("child_process");
   if (process.platform === "win32") {
     exec(
-      'wmic process where "(Name=\'node.exe\' and CommandLine like \'%claude-code%\') or Name=\'claude.exe\' or Name=\'codex.exe\' or Name=\'copilot.exe\' or Name=\'gemini.exe\' or Name=\'codebuddy.exe\' or Name=\'kiro.exe\' or Name=\'opencode.exe\'" get ProcessId /format:csv',
+      'wmic process where "(Name=\'node.exe\' and CommandLine like \'%claude-code%\') or Name=\'claude.exe\' or Name=\'codex.exe\' or Name=\'copilot.exe\' or Name=\'gemini.exe\' or Name=\'codebuddy.exe\' or Name=\'kiro.exe\' or Name=\'kimi.exe\' or Name=\'opencode.exe\'" get ProcessId /format:csv',
       { encoding: "utf8", timeout: 5000, windowsHide: true },
       (err, stdout) => done(!err && /\d+/.test(stdout))
     );
   } else {
-    exec("pgrep -f 'claude-code|codex|copilot|codebuddy' || pgrep -x 'gemini' || pgrep -x 'kiro' || pgrep -x 'opencode'", { timeout: 3000 },
+    exec("pgrep -f 'claude-code|codex|copilot|codebuddy|kimi' || pgrep -x 'gemini' || pgrep -x 'kiro' || pgrep -x 'opencode'", { timeout: 3000 },
       (err) => done(!err)
     );
   }
@@ -887,27 +988,76 @@ function stopStaleCleanup() {
 }
 
 function startKimiPermissionPoll(sessionId) {
-  if (kimiPermissionTimer) {
-    clearTimeout(kimiPermissionTimer);
-    kimiPermissionTimer = null;
+  if (!sessionId) return;
+  cancelPermissionSuspect(sessionId);
+  const existing = kimiPermissionHolds.get(sessionId);
+  if (existing && existing.timer) clearTimeout(existing.timer);
+  const maxMs = parseKimiHoldMaxMs();
+  let timer = null;
+  if (maxMs > 0) {
+    // Last-resort safety cap. The primary release path is event-driven
+    // (PostToolUse / Stop / UserPromptSubmit / new PreToolUse / SessionEnd /
+    // cleanStaleSessions when the Kimi PID dies). The timer just prevents
+    // permanent stuck state if every other signal is somehow lost.
+    timer = setTimeout(() => {
+      kimiPermissionHolds.delete(sessionId);
+      applyResolvedDisplayState();
+    }, maxMs);
   }
-  kimiPermissionActive = true;
-  // Safety cap: if something goes wrong (e.g. PostToolUse never arrives),
-  // auto-clear after 60s so the pet doesn't get stuck forever.
-  kimiPermissionTimer = setTimeout(() => {
-    kimiPermissionActive = false;
-    kimiPermissionTimer = null;
-    applyResolvedDisplayState();
-  }, KIMI_PERMISSION_MAX_MS);
+  kimiPermissionHolds.set(sessionId, {
+    timer,
+    until: maxMs > 0 ? Date.now() + maxMs : null,
+  });
+}
+
+function cancelPermissionSuspect(sessionId) {
+  if (!sessionId) return false;
+  const existing = kimiPermissionSuspectTimers.get(sessionId);
+  if (!existing) return false;
+  clearTimeout(existing.timer);
+  kimiPermissionSuspectTimers.delete(sessionId);
+  return true;
+}
+
+function schedulePermissionSuspect(sessionId) {
+  if (!sessionId) return;
+  const delay = parseSuspectDelay();
+  // A zero delay disables the heuristic entirely (caller shouldn't reach
+  // this path in that case, but handle defensively).
+  if (delay <= 0) return;
+  cancelPermissionSuspect(sessionId);
+  const timer = setTimeout(() => {
+    kimiPermissionSuspectTimers.delete(sessionId);
+    // Only promote if the session still exists and no terminal event has
+    // flipped it elsewhere (PostToolUse etc. would have cancelled us).
+    if (!sessions.has(sessionId) && !kimiPermissionHolds.has(sessionId)) return;
+    startKimiPermissionPoll(sessionId);
+    setState("notification");
+  }, delay);
+  kimiPermissionSuspectTimers.set(sessionId, { timer, scheduledAt: Date.now() });
 }
 
 function stopKimiPermissionPoll(sessionId) {
-  if (kimiPermissionTimer) {
-    clearTimeout(kimiPermissionTimer);
-    kimiPermissionTimer = null;
+  if (!sessionId) {
+    const hadHold = kimiPermissionHolds.size > 0;
+    const hadSuspect = kimiPermissionSuspectTimers.size > 0;
+    if (!hadHold && !hadSuspect) return;
+    for (const { timer } of kimiPermissionHolds.values()) {
+      if (timer) clearTimeout(timer);
+    }
+    kimiPermissionHolds.clear();
+    for (const { timer } of kimiPermissionSuspectTimers.values()) clearTimeout(timer);
+    kimiPermissionSuspectTimers.clear();
+    applyResolvedDisplayState();
+    return;
   }
-  if (kimiPermissionActive) {
-    kimiPermissionActive = false;
+  const cancelled = cancelPermissionSuspect(sessionId);
+  const existing = kimiPermissionHolds.get(sessionId);
+  if (existing) {
+    if (existing.timer) clearTimeout(existing.timer);
+    kimiPermissionHolds.delete(sessionId);
+    applyResolvedDisplayState();
+  } else if (cancelled) {
     applyResolvedDisplayState();
   }
 }
@@ -926,10 +1076,9 @@ function resolveDisplayState() {
     }
     if (!hasNonHeadless) best = "idle";
   }
-  // Kimi CLI permission hold: while waiting for user approval, keep the pet
-  // visually in notification state. Resolved here so it participates in the
-  // same priority logic as other agent states.
-  if (kimiPermissionActive && (STATE_PRIORITY[best] || 0) < (STATE_PRIORITY.notification || 0)) {
+  // Permission animation lock (highest priority): if any permission request is
+  // pending, always pin notification regardless of session priority.
+  if (hasPermissionAnimationLock()) {
     best = "notification";
   }
 
@@ -1150,6 +1299,12 @@ function cleanup() {
   if (eyeResendTimer) clearTimeout(eyeResendTimer);
   if (startupRecoveryTimer) clearTimeout(startupRecoveryTimer);
   if (wakePollTimer) clearInterval(wakePollTimer);
+  for (const { timer } of kimiPermissionHolds.values()) {
+    if (timer) clearTimeout(timer);
+  }
+  kimiPermissionHolds.clear();
+  for (const { timer } of kimiPermissionSuspectTimers.values()) clearTimeout(timer);
+  kimiPermissionSuspectTimers.clear();
   stopStaleCleanup();
 }
 

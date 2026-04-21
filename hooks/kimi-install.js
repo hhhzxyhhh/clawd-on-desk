@@ -34,9 +34,10 @@ const KIMI_HOOK_EVENTS = [
 function registerKimiHooks(options = {}) {
   const settingsPath = options.settingsPath || path.join(os.homedir(), ".kimi", "config.toml");
 
-  // Skip if ~/.kimi/ doesn't exist (Kimi CLI not installed)
+  // Skip if target Kimi config directory doesn't exist (Kimi CLI not installed
+  // or custom path points to a non-existent home).
   const kimiDir = path.dirname(settingsPath);
-  if (!options.settingsPath && !fs.existsSync(kimiDir)) {
+  if (!fs.existsSync(kimiDir)) {
     if (!options.silent) console.log("Clawd: ~/.kimi/ not found — skipping Kimi hook registration");
     return { added: 0, skipped: 0, updated: 0 };
   }

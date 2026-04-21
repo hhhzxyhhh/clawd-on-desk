@@ -117,6 +117,12 @@ describe("Agent Registry", () => {
     assert.strictEqual(kiro.capabilities.permissionApproval, false);
     assert.strictEqual(kiro.capabilities.sessionEnd, false);
     assert.strictEqual(kiro.capabilities.subagent, false);
+
+    const kimi = registry.getAgent("kimi-cli");
+    assert.strictEqual(kimi.capabilities.httpHook, true);
+    assert.strictEqual(kimi.capabilities.permissionApproval, true);
+    assert.strictEqual(kimi.capabilities.sessionEnd, true);
+    assert.strictEqual(kimi.capabilities.subagent, true);
   });
 
   it("should have eventMap for hook-based agents", () => {
@@ -140,6 +146,11 @@ describe("Agent Registry", () => {
     assert.strictEqual(cursor.eventMap.preToolUse, "working");
     assert.strictEqual(cursor.eventMap.afterAgentThought, "thinking");
     assert.strictEqual(cursor.eventMap.stop, "attention");
+
+    const kimi = registry.getAgent("kimi-cli");
+    assert.strictEqual(kimi.eventMap.SessionStart, "idle");
+    assert.strictEqual(kimi.eventMap.PreToolUse, "working");
+    assert.strictEqual(kimi.eventMap.Stop, "attention");
   });
 
   it("should have logEventMap for poll-based agents", () => {
